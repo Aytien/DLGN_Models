@@ -17,42 +17,96 @@ from DLGN_VT import DLGN_VT
 from DLGN_enums import ModelTypes, KernelTrainMethod, LossTypes, VtFit, Optim
 from copy import deepcopy
 import matplotlib.pyplot as plt
+import gc
+
+def get_tensors_on_cuda():
+    total_size = 0
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                if obj.is_cuda:
+                    size_tensor = obj.element_size() * obj.nelement()
+                    print(type(obj), obj.size(), size_tensor/1024**2, "MB")
+                    total_size += size_tensor
+        except Exception as e:
+            pass
+    print("Total size of tensors on cuda: ", total_size/1024**2)
+
+def print_cuda_mem():
+    print(f"allocated: {torch.cuda.memory_allocated() / 1e6}MB, max: {torch.cuda.max_memory_allocated() / 1e6}MB, reserved: {torch.cuda.memory_reserved() / 1e6}MB")
+    # print(torch.cuda.memory_summary())
+
+def set_npseed(seed):
+	np.random.seed(seed)
+
+def set_torchseed(seed):
+	torch.manual_seed(seed)
+	torch.cuda.manual_seed(seed)
+	torch.cuda.manual_seed_all(seed)
+	torch.backends.cudnn.deterministic = True
+	torch.backends.cudnn.benchmark = False
 
 def sigmoid(u):
     return 1/(1+np.exp(-u))
 
-def cal_loss(model, loss_fn, data, labels, config, print_acc=False):
+def check_dth_proximity(model, data_dim, threshold=0.5):
+    features = model.log_features()
+    count = np.zeros(len(features))
+    dt_hps = torch.eye(data_dim)
+    for (i, feature) in enumerate(features):
+      for hps in dt_hps:
+        if torch.linalg.vector_norm(feature - hps) < threshold or torch.linalg.vector_norm(feature + hps) < threshold:
+          count[i] += 1
+          break
+    count = count.reshape(model.depth, model.width)
+    count = np.sum(count, axis=1)/model.width
+    return count
 
+def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
+    preds = []
+    total_loss = 0
+    acc = 0
+    for x_batch, y_batch in dataloader:
         if config.model_type == ModelTypes.KERNEL:
-            preds = model(data, data)
+            pred_batch = model(x_batch, data)
         else:
-            preds = model(data)
+            pred_batch = model(x_batch)
 
-        if config.loss_fn_type == LossTypes.HINGE:
-            preds = preds.reshape(-1)
-            preds_lab = torch.sign(preds) * 0.5 + 0.5
-            preds_lab = preds_lab.to(torch.int64).reshape(-1)
-            if type(labels) == np.ndarray:
-                labels = torch.tensor(labels, dtype=torch.int64).reshape(-1)
-            else:
-                labels = labels.to(torch.int64).reshape(-1)
-            if print_acc:
-                # var = 1 - preds * (2*labels - 1)
-                # plt.hist(var.cpu().detach().numpy())
-                # plt.savefig('outputs/hinge_loss_hist.png')
-                # plt.show()
-                print("Accuracy: ", torch.sum(preds_lab == labels).item()/len(labels))
-            return loss_fn(preds, labels)
-        elif config.loss_fn_type == LossTypes.CE:
-            preds = preds.reshape(-1,1)
-            outputs = torch.cat((-1*preds, preds), dim=1)
-            if type(labels) == np.ndarray:
-                labels = torch.tensor(labels, dtype=torch.int64)
-            else:
-                labels = labels.to(torch.int64)
-            if print_acc:
-                print("Accuracy: ", torch.sum(torch.argmax(outputs, dim=1) == labels).item()/len(labels))
-            return loss_fn(outputs, labels)
+        if type(y_batch) == np.ndarray:
+            y_batch = torch.tensor(y_batch, dtype=torch.int64)
+        else:
+            y_batch = y_batch.to(torch.int64)
+        
+        if config.loss_fn_type == LossTypes.CE:
+            pred_batch = pred_batch.reshape(-1,1)
+            pred_batch = torch.cat((-1*pred_batch, pred_batch), dim=1)
+            loss = loss_fn(pred_batch, y_batch)
+            acc += torch.sum(torch.argmax(pred_batch, dim=1) == y_batch).item()
+        elif config.loss_fn_type == LossTypes.HINGE:
+            pred_batch = pred_batch.reshape(-1)
+            loss = loss_fn(pred_batch, y_batch)
+            pred_batch = torch.sign(pred_batch) * 0.5 + 0.5
+            pred_batch = pred_batch.to(torch.int64).reshape(-1)
+            acc += torch.sum(pred_batch == y_batch).item()
+        loss.backward()
+        total_loss += loss.item() * len(y_batch)
+        # print_cuda_mem()
+        preds.append(pred_batch)
+    preds = torch.cat(preds, dim=0)
+
+    with torch.cuda.device(config.device):
+        del preds
+        torch.cuda.empty_cache()
+
+    total_loss /= len(labels)
+    acc /= len(labels)
+
+    if print_acc and config.use_wandb == False:
+        print("Accuracy: ", acc)
+        if config.model_type == ModelTypes.KERNEL:
+            print("Proximity: ", check_dth_proximity(model, config.dim_in, config.threshold))
+            print("Loss with regularization: ", (total_loss + (config.reg*torch.linalg.norm(model.alphas)**2)/2).item())
+    return total_loss, acc
 
 
 def train_model(data, config):
@@ -61,9 +115,12 @@ def train_model(data, config):
 
     model = None
     model_type = config.model_type
-    
+
+    set_npseed(41972)
+    set_torchseed(41972)    
+
     if model_type == ModelTypes.KERNEL:
-        model = DLGN_Kernel(config.num_data, config.dim_in, config.width, config.depth, config.beta, config.alpha_init, config.loss_fn_type)
+        model = DLGN_Kernel(config.num_data, config.dim_in, config.width, config.depth, config.beta, config.alpha_init, config.BN)
     elif model_type == ModelTypes.VN:
         model = DLGN_FC(config.dim_in, 1, config.num_hidden_nodes, config.beta, config.mode)
     elif model_type == ModelTypes.VT:
@@ -98,20 +155,21 @@ def train_model(data, config):
     data['test_labels'] = data['test_labels'].to(device).to(torch.int64)
 
     ret_model = None
-
+    train_losses = None
     if model_type == ModelTypes.KERNEL:
-        ret_model = kernel_train_methods(model, loss_fn, data, config)
+        ret_model, train_losses = kernel_train_methods(model, loss_fn, data, config)
     elif model_type == ModelTypes.VN:
         ret_model = vn_train_methods(model, loss_fn, data, config)
     elif model_type == ModelTypes.VT:
-        ret_model = vt_train_methods(model, loss_fn, data, config)
-    return ret_model
-    # write a switch statement for different train_methods
+        ret_model, train_losses = vt_train_methods(model, loss_fn, data, config)
+    with torch.cuda.device(config.device):
+        torch.cuda.empty_cache()
+    return ret_model, train_losses
 
 def kernel_train_methods(model, loss_fn, data, config):
     train_method = config.train_method
     
-    if train_method == KernelTrainMethod.PEGASOS or train_method == KernelTrainMethod.SVC:
+    if train_method == KernelTrainMethod.PEGASOS or train_method == KernelTrainMethod.SVC or train_method == KernelTrainMethod.SNACKS: 
         return svc_train(model, loss_fn, data, config)#[0]
     elif train_method == KernelTrainMethod.VANILA:
         return vanila_train(model, loss_fn, data, config)[0]
@@ -148,14 +206,14 @@ def pegasos_train(model, loss_fn, data, config):
     test_dataset = CustomDataset(test_data, test_labels)
 
     # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     if(log_features):
         features_initial = model.log_features()
         features_train=[]
 
-    Train_losses=[]
+    train_losses=[]
     for epoch in range(num_epochs):
         if epoch in update_value_epochs:
             num_iter = 1000
@@ -199,7 +257,7 @@ def pegasos_train(model, loss_fn, data, config):
                 train_accuracy = np.sum((y_pred.cpu().detach().numpy() > 0.5) == (train_labels.cpu().numpy() > 0.5))/len(train_labels)
             if(config.use_wandb):
                 wandb.log({'train_loss': loss_full.item(), 'train_accuracy': train_accuracy, 'epoch': epoch})
-            Train_losses.append(loss_full.item())
+            train_losses.append(loss_full.item())
 
             # fs = feature_stats(features_train[-1],data_dim=dim_in,tree_depth=tree_depth,dim_in=dim_in)
             print(f'Epoch {epoch} Loss {loss_full.item():.4f}')
@@ -211,7 +269,7 @@ def pegasos_train(model, loss_fn, data, config):
     if(log_features):
         features_final = model.log_features()
 
-    return model, Train_losses
+    return model, train_losses
 
 def svc_train(model, loss_fn, data, config):
     train_data = data['train_data']
@@ -219,12 +277,12 @@ def svc_train(model, loss_fn, data, config):
     train_labels = data['train_labels']
     test_labels = data['test_labels']
 
-    batch_size = 32
+    batch_size = 1024
     train_dataset = CustomDataset(train_data, train_labels)
     test_dataset = CustomDataset(test_data, test_labels)
 
     # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     optimizer = None
@@ -243,18 +301,18 @@ def svc_train(model, loss_fn, data, config):
     log_weight = log_epochs
     num_epochs = config.epochs
 
-    # log_features = config.log_features
+    train_losses=[]
+    with torch.cuda.device(config.device):
+        torch.cuda.empty_cache()
 
-    # if(log_features):
-    #     features_initial = model.log_features()
-    #     features_train=[]
-    # Train_losses=[]
     update_value_epochs = list(range(0,num_epochs+1,config.value_freq))
     tepoch = tqdm(range(num_epochs+1))
     for epoch in tepoch:
         if epoch in update_value_epochs:
-            pre_update_loss = cal_loss(model, loss_fn, train_data, train_labels, config, print_acc=True)
-            print("Loss before updating alphas at epoch", epoch, " is ", pre_update_loss.item())
+            pre_update_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
+            if config.use_wandb == False:
+                print("Loss before updating alphas at epoch", epoch, " is ", pre_update_loss)
+            train_losses.append(pre_update_loss)
             npk = model.get_npk
             if config.train_method == KernelTrainMethod.SVC:
                 clf = SVC(C=config.reg, kernel=npk)
@@ -269,25 +327,42 @@ def svc_train(model, loss_fn, data, config):
                 clf = Pegasos_kernel(lambd=config.reg, num_iter=num_iter, kernel=npk, loss_fn_type=kernel_loss_fn_type)
                 clf.fit(train_data.cpu(), train_labels.cpu())
                 model.alphas.data = torch.tensor((clf.alpha * clf.y) / (config.reg * num_iter), requires_grad=False, dtype=torch.float32).to(config.device)
-            post_update_loss = cal_loss(model, loss_fn, train_data, train_labels, config, print_acc=True)
-            print("Loss after updating alphas at epoch", epoch, " is ", post_update_loss.item())
+            post_update_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
+            if config.use_wandb:
+                wandb.log({'train_loss': post_update_loss, 'epoch': epoch, 'train_accuracy': train_acc, 'update_loss_diff': post_update_loss - pre_update_loss})
+            else:
+                print("Loss after updating alphas at epoch", epoch, " is ", post_update_loss)
+            train_losses.append(post_update_loss)
+            test_loss, test_acc = cal_loss(model, loss_fn, train_data, test_dataloader, test_labels, config, print_acc=True)
+            proximity = check_dth_proximity(model, config.dim_in, config.threshold)
+            if config.use_wandb:
+                wandb.log({'test_loss': test_loss, 'epoch': epoch, 'test_accuracy': test_acc,'avg_proximity': np.mean(proximity), 'max_proximity': np.max(proximity)})
+            else:
+                print("Test loss after updating alphas at epoch", epoch, " is ", test_loss)
+
         
         for x_batch, y_batch in train_dataloader:
             optimizer.zero_grad()
             outputs = model(x_batch,train_data).reshape(-1)
             if(config.loss_fn_type == LossTypes.CE):
-                outputs.reshape(-1,1)
+                outputs = outputs.reshape(-1,1)
                 outputs = torch.cat((-1*outputs, outputs), dim=1)
             loss = loss_fn(outputs, y_batch)
             loss.backward()
             optimizer.step()
-        
-        train_loss = cal_loss(model, loss_fn, train_data, train_labels, config, print_acc=False)
-        tepoch.set_description(f"Train Loss: {train_loss.item():.4f}")
-    
-    # cal_loss(model, loss_fn, test_data, test_labels, config, print_acc=True)
-    return model
 
+        train_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=False)
+        train_losses.append(train_loss)
+        tepoch.set_description(f"Train Loss: {train_loss:.4f}")
+        if config.use_wandb:
+            wandb.log({'train_loss': train_loss, 'epoch': epoch, 'train_accuracy': train_acc})
+
+        if epoch%10 == 0:
+            with torch.cuda.device(config.device):
+                torch.cuda.empty_cache()
+            
+    
+    return model, train_losses
 
 def vanila_train(model, loss_fn, data, config):
     train_data = data['train_data']
@@ -300,7 +375,7 @@ def vanila_train(model, loss_fn, data, config):
     test_dataset = CustomDataset(test_data, test_labels)
 
     # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     optimizer = None
@@ -319,7 +394,7 @@ def vanila_train(model, loss_fn, data, config):
     if(log_features):
         features_initial = model.log_features()
         features_train=[]
-    Train_losses=[]
+    train_losses=[]
 
     for epoch in range(num_epochs):
         # model.train()
@@ -366,7 +441,7 @@ def vanila_train(model, loss_fn, data, config):
             if(config.use_wandb):
                 wandb.log({'train_loss': loss_full.item(), 'train_accuracy': train_accuracy, 'epoch': epoch})
             print(f'Train Accuracy: {train_accuracy}')
-            Train_losses.append(loss_full.item())
+            train_losses.append(loss_full.item())
 
             print(f'Epoch {epoch} Loss {loss_full.item():.4f}')
 
@@ -377,7 +452,7 @@ def vanila_train(model, loss_fn, data, config):
     if(log_features):
         features_final = model.log_features()
 
-    return model, Train_losses
+    return model, train_losses
 
 def vn_train_methods(model, loss_fn, data, config):
     train_data = data['train_data']
@@ -393,7 +468,7 @@ def vn_train_methods(model, loss_fn, data, config):
     test_dataset = CustomDataset(test_data, test_labels)
 
     # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     optimizer = None
@@ -401,7 +476,7 @@ def vn_train_methods(model, loss_fn, data, config):
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     
     num_epochs = 3000
-    Train_losses = []
+    train_losses = []
     for epoch in tqdm(range(num_epochs)):
         running_loss = 0.0
         train_acc = 0
@@ -424,7 +499,7 @@ def vn_train_methods(model, loss_fn, data, config):
             optimizer.step()
             running_loss += loss.item()
         train_acc = train_acc/len(train_data)
-        Train_losses.append(running_loss/num_batches)
+        train_losses.append(running_loss/num_batches)
 
 def vt_train_methods(model, loss_fn, data, config):
 
@@ -438,7 +513,7 @@ def vt_train_methods(model, loss_fn, data, config):
     test_dataset = CustomDataset(test_data, test_labels)
 
     # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     optimizer = None
@@ -457,6 +532,8 @@ def vt_train_methods(model, loss_fn, data, config):
     debug_models= []
     saved_epochs = list(range(0,epochs+1,save_freq))
     update_value_epochs = list(range(0,epochs+1,value_freq))
+
+    train_losses = []
 
     best_test_error=len(test_data)
     # filename_suffix = str(data_config.num_points)+'_'+str(data_config.depth)+'_val_'+str(value_freq)
@@ -487,15 +564,15 @@ def vt_train_methods(model, loss_fn, data, config):
             # targets = torch.tensor(train_labels, dtype=torch.int64)
             # train_loss = loss_fn(outputs, targets)
 
-            train_loss = cal_loss(model, loss_fn, train_data, train_labels, config, print_acc=True)
+            train_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
             # with open(filename,'a') as f:
             #     sys.stdout = f
-            pre_update_loss = train_loss.item()
-            print("Loss lefore updating value_net at epoch", epoch, " is ", train_loss.item())
+            pre_update_loss = train_loss
+            print("Loss before updating value_net at epoch", epoch, " is ", train_loss)
             #     # print("Total path squared value", (model.value_layers.cpu().detach()**2).sum().numpy())
             #     print("Total path abs value", torch.abs(model.value_layers.cpu().detach()).sum().numpy())
             #     sys.stdout = original_stdout
-
+            train_losses.append(pre_update_loss)
             ew = model.return_gating_functions()
             beta = model.beta
 
@@ -563,12 +640,13 @@ def vt_train_methods(model, loss_fn, data, config):
             A = model.value_layers.detach()
             A[:] = torch.Tensor(value_wts)
 
-            train_loss = cal_loss(model, loss_fn, train_data, train_labels, config, print_acc=True)
+            train_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
 
             # with open(filename,'a') as f:
             #     sys.stdout = f
-            post_update_loss = train_loss.item()
-            print("Loss after updating value_net at epoch", epoch, " is ", train_loss.item())			
+            post_update_loss = train_loss
+            print("Loss after updating value_net at epoch", epoch, " is ", train_loss)		
+            train_losses.append(post_update_loss)	
             # # print("Total path squared value", (model.value_layers.cpu().detach()**2).sum().numpy())
             #     print("Total path abs value", torch.abs(model.value_layers.cpu().detach()).sum().numpy())
             #     sys.stdout = original_stdout
@@ -600,16 +678,17 @@ def vt_train_methods(model, loss_fn, data, config):
                     param.grad *= 0.5
             optimizer.step()
 
-        train_loss = cal_loss(model, loss_fn, train_data, train_labels, config)
+        train_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config)
 
         # if epoch%10 == 0:
-        #     print("Loss after updating at epoch ", epoch, " is ", train_loss.item())
+        #     print("Loss after updating at epoch ", epoch, " is ", train_loss)
         if train_loss < 5e-3:
             break
         if np.isnan(train_loss.detach().cpu().numpy()):
             break
 
-        losses.append(train_loss.cpu().detach().clone().numpy())
+        # losses.append(train_loss.cpu().detach().clone().numpy())
+        train_losses.append(train_loss)
         inputs = test_data
         targets = test_labels
         preds = model(inputs).reshape(-1,1)
@@ -630,6 +709,10 @@ def vt_train_methods(model, loss_fn, data, config):
         acc_dict['train'].append(1-train_error.item()/len(train_labels))
 
         tepoch.set_description("Loss %f" % train_loss)
+
+        if epoch%10 == 0:
+            with torch.cuda.device(config.device):
+                torch.cuda.empty_cache()
 
 
         # if epoch%10 == 0:
@@ -657,5 +740,5 @@ def vt_train_methods(model, loss_fn, data, config):
     # logging.info(f'p_1:{p_1}, p_2:{p_2}, p_3:{p_3}, p_5:{p_5}', end='')
         
     # return losses, acc_dict, model_return,best_test_error, model_store
-    return model
+    return model, train_losses
 

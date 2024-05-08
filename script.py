@@ -14,24 +14,17 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(seed)
 
     # Set the device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
-    dim_in = 20
-    tree_depth = 3
-    num_points = 10000
+    DATASET = "dataset3"
 
-    X,Y = gen_spherical_data(depth=tree_depth, dim_in=dim_in, type_data='spherical', num_points=num_points, feat_index_start=0,radius=1)
-
-
-    x_train, x_test, y_train, y_test = train_test_split(
-        X, Y, test_size=0.1, random_state=42, stratify=Y
-    )
-
+    DATA_DIR = 'data/' + DATASET
     data = {}
-    data['train_data'] = x_train
-    data['train_labels'] = y_train 
-    data['test_data'] = x_test
-    data['test_labels'] = y_test
+    data['train_data'] = torch.tensor(np.load(DATA_DIR + '/x_train.npy'))
+    data['train_labels'] = torch.tensor(np.load(DATA_DIR + '/y_train.npy'))
+    data['test_data'] = torch.tensor(np.load(DATA_DIR + '/x_test.npy'))
+    data['test_labels'] = torch.tensor(np.load(DATA_DIR + '/y_test.npy'))
+    data_config = np.load(DATA_DIR + '/config.npy', allow_pickle=True).item()
 
     WANDB_NOTEBOOK_NAME = 'DLGN_Kernel'
     WANDB_PROJECT_NAME = 'DLGN_KERNEL_BTP'
@@ -39,23 +32,17 @@ if __name__ == "__main__":
     wandb.login()
 
     sweep_config = {
-        "name": "KernelCompleteBackprop",
+        "name": "KernelPegasos_D3_CE",
         "method": "random",
         "parameters": {
-            "num_data": {
-                "values": [len(data['train_data'])]
-            },
-            "dim_in": {
-                "values": [dim_in]
-            },
             "depth": {
-                "values": [4,5]
+                "values": [3,4,5]
             },
             "width": {
-                "values": [10,15,20]
+                "values": [16,32,128,1024]
             },
             "beta": {
-                "values": [10,20]
+                "values": [30]
             },
             "alpha_init": {
                 "values": [None]
@@ -63,32 +50,50 @@ if __name__ == "__main__":
             "log_features": {
                 "values": [False]
             },
-            "gates_lr": {
-                "values": [0.1,0.5]
+            "BN": {
+                "values": [True]
             },
-            "alpha_lr": {
-                "values": [0.1,0.5]
+            "gates_lr": {
+                "values": [0.01]
+            },
+            "epochs":{
+                "values": [1000]
+            },
+            "reg": {
+                "values": [0.001]
+            },
+            "value_freq": {
+                "values": [25,50,100]
+            },
+            "num_iter": {
+                "values": [5e4]
             },
             "weight_decay": {
-                "values": [0,0.1,0.01]
+                "values": [0.01]
+            },
+            "threshold":{
+                "values": [0.3]
             },
             "use_wandb": {
                 "values": [True]
-            }
+            },
+
         }
     }
     sweep_id = wandb.sweep(sweep_config, entity=WANDB_ENTITY, project=WANDB_PROJECT_NAME)
     const_config = {
         "device" : device,
         "model_type" : ModelTypes.KERNEL,                    
-        "loss_fn_type" : LossTypes.BCE,
-        "optimizer_type" : None,
-        "train_method" : KernelTrainMethod.VANILA,
+        "loss_fn_type" : LossTypes.CE,
+        "optimizer_type" : Optim.ADAM,
+        "train_method" : KernelTrainMethod.PEGASOS,
+        "num_data" : len(data['train_data']),
+        "dim_in": data_config.dim_in,
     }
     def wb_sweep_sf():
         run = wandb.init()
         config = wandb.config
-        filename_suffx = str(config.depth) + '_' + str(config.width) + '_' + str(config.beta) + '_' + format(config.gates_lr,".1e") + '_' + format(config.alpha_lr,".1e")  
+        filename_suffx = str(config.depth) + '_' + str(config.width) + '_' + format(config.value_freq,".1e")   
         run.name = filename_suffx
         config = {**config, **const_config}
         config = Namespace(**config)
@@ -99,24 +104,4 @@ if __name__ == "__main__":
     wandb.agent(sweep_id, wb_sweep_sf, entity=WANDB_ENTITY, project=WANDB_PROJECT_NAME, count=40)
     wandb.finish()
 
-    # config = {
-    # "device" : device,
-    # "model_type" : ModelTypes.KERNEL,
-    # "num_data" : len(data['train_data']),
-    # "dim_in" : dim_in,
-    # "width" : 4,
-    # "depth" : 4,
-    # "beta" : 10,
-    # "alpha_init" : None,
-    # "loss_fn_type" : LossTypes.BCE,
-    # "optimizer_type" : None,
-    # "train_method" : KernelTrainMethod.VANILA,
-    # "log_features" : False,
-    # "gates_lr" : 0.1,
-    # "alpha_lr" : 0.01,
-    # 'weight_decay' : 0.01,
-    # "use_wandb" : False,
-    # }
-    # config = Namespace(**config)
-    # print(type(config.model_type))
-    # model = train_model(data,config)
+

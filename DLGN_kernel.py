@@ -11,7 +11,7 @@ def ScaledSig(x, beta):
 
 
 class DLGN_Kernel(nn.Module):
-    def __init__(self, num_data, dim_in,  width, depth, beta = 4, alpha_init='zero', loss_fn_type=LossTypes.HINGE):
+    def __init__(self, num_data, dim_in,  width, depth, beta = 4, alpha_init='zero', BN=False):
         super().__init__()
         self.num_data = num_data
         self.beta = beta
@@ -19,7 +19,7 @@ class DLGN_Kernel(nn.Module):
         self.width = width
         self.depth = depth
         self.ainit = alpha_init
-        self.loss_fn_type = loss_fn_type
+        self.BN = BN
         sigma = 1/np.sqrt(width)
         self.gating_layers = nn.ParameterList([nn.Parameter(sigma*torch.randn(dim_in if i == 0 else width, width)) for i in range(depth)])
         if self.ainit == 'zero':
@@ -36,19 +36,30 @@ class DLGN_Kernel(nn.Module):
 
     def forward(self, inp, data):
         output_kernel = self.npk_forward(inp, data)
-        return output_kernel @ self.alphas
+        preds = output_kernel @ self.alphas
+        del output_kernel
+        with torch.cuda.device(self.gating_layers[0].device):
+            torch.cuda.empty_cache()
+        return preds
     
     def npk_forward(self, inp, data):  
         
         data_gate_matrix = data @ self.gating_layers[0]
-        data_gate_score = ScaledSig(data_gate_matrix, self.beta)
         inp_gate_matrix = inp @ self.gating_layers[0]
+
+        if self.BN:
+            data_gate_matrix /= torch.norm(self.gating_layers[0], dim=0, keepdim=True)
+            inp_gate_matrix /= torch.norm(self.gating_layers[0], dim=0, keepdim=True)
+        data_gate_score = ScaledSig(data_gate_matrix, self.beta)
         inp_gate_score = ScaledSig(inp_gate_matrix, self.beta)
         output_kernel =  (inp_gate_score @ data_gate_score.T)
 
         for i in range(1,self.depth):
             data_gate_matrix = data_gate_matrix @ self.gating_layers[i]
             inp_gate_matrix = inp_gate_matrix @ self.gating_layers[i]
+            if self.BN:
+                data_gate_matrix /= torch.norm(self.gating_layers[i], dim=0, keepdim=True)
+                inp_gate_matrix /= torch.norm(self.gating_layers[i], dim=0, keepdim=True)
             data_gate_score = ScaledSig(data_gate_matrix, self.beta)
             inp_gate_score = ScaledSig(inp_gate_matrix, self.beta)
             output_kernel *= (inp_gate_score @ data_gate_score.T)/self.width
@@ -66,27 +77,30 @@ class DLGN_Kernel(nn.Module):
             Y = Y.to(device)
 
         output_kernel = self.npk_forward(X, Y)
-
-        return output_kernel.detach().cpu().numpy()
+        output_kernel = output_kernel.cpu().detach().numpy()
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+        return output_kernel 
 
 
     
-    def log_features_dlgn(self,bias=False):   ## Don't use it for DLGN self
+    def log_features(self,bias=False):   ## Don't use it for DLGN self
         w_list = []
         b_list = []
         for name, param in self.named_parameters():
             for i in range(0,self.depth):
-                param_data = deepcopy(param.data)
-                if name == 'gating_layers.'+str(i)+'.weight':
-                    w_list.append(param_data)
+                if name == 'gating_layers.'+str(i):
+                    w_list.append(param.data)
                 if bias:
                     if name == 'gating_layers.'+str(i)+'.bias':
-                        b_list.append(param_data)
+                        b_list.append(param.data)
 
-        Feature_list = [w_list[0]]
+        Feature_list = [w_list[0].T/torch.linalg.norm(w_list[0].T, ord=2, dim=1).reshape(-1,1)]
 
         for w in w_list[1:]:
-            Feature_list.append(w @ Feature_list[-1])
+            Feature_list.append(w.T @ Feature_list[-1])
+            Feature_list[-1] = Feature_list[-1]/torch.linalg.norm(Feature_list[-1], ord=2, dim=1).reshape(-1,1)
+
 
         features = torch.cat(Feature_list, axis = 0).to("cpu")
 

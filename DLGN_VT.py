@@ -141,3 +141,28 @@ class DLGN_VT(nn.Module):
                 cp = cp*gate_score #batch * m^{i} -> batch * m^{i+1} 
 
         return cp
+    
+    def log_features(self,bias=False):
+        w_list = []
+        b_list = []
+        for name, param in self.named_parameters():
+            for i in range(0,self.depth):
+                if name == 'gating_layers.'+str(i):
+                    w_list.append(param.data)
+                if bias:
+                    if name == 'gating_layers.'+str(i)+'.bias':
+                        b_list.append(param.data)
+
+        Feature_list = [w_list[0].T/torch.linalg.norm(w_list[0].T, ord=2, dim=1).reshape(-1,1)]
+
+        for w in w_list[1:]:
+            if self.feat == 'cf':
+                Feature_list.append(w.T @ Feature_list[-1])
+            elif self.feat == 'sf':
+                Feature_list.append(w.T)
+            Feature_list[-1] = Feature_list[-1]/torch.linalg.norm(Feature_list[-1], ord=2, dim=1).reshape(-1,1)
+
+
+        features = torch.cat(Feature_list, axis = 0).to("cpu")
+
+        return features

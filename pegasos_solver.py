@@ -88,7 +88,8 @@ class Pegasos_kernel:
             #     print("Rest Calculation : ", acc/100)
             #     acc = 0
                 # acc1 = 0
-        print(np.sum(self.alpha)/self.num_iter)
+        del kernels
+        # print(np.sum(self.alpha)/self.num_iter)
 
 
     def check_data(self, X, y):
@@ -109,4 +110,4 @@ class Pegasos_kernel:
         coef = (self.alpha*self.y)
         kernel_value = self.kernel(self.X, X)
         return (np.sign(np.dot(coef, kernel_value)) * 0.5 + 0.5).astype(int)
-        # return np.sign(np.sum(self.alpha*self.y*self.kernel(self.X, X), axis=0))
+        

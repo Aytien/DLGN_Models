@@ -2,3 +2,8 @@
 __pycache__/
 figures/
 outputs/
+data/
+tmp.py
+tmp.txt
+reg_values.txt
+wandb/

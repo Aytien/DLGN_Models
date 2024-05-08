@@ -15,6 +15,7 @@ class KernelTrainMethod(Enum):
     PEGASOS = 'PEGASOS'
     VANILA = 'VANILA'
     SVC = 'SVC'
+    SNACKS = 'SNACKS'
 
 class VtFit(Enum):
     LOGISTIC = 'LOGISTIC'
