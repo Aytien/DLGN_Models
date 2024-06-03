@@ -57,39 +57,46 @@ class Pegasos_kernel:
         self.check_data(X, y)
 
         self.alpha = np.zeros(self.X.shape[0])
+        batch_size = 5000
+        num_batches = self.num_iter//batch_size
+        self.num_iter = num_batches*batch_size
+
         # acc = 0
         # acc1 = 0
-        upd_idx = np.random.randint(low = 0, high = self.X.shape[0], size=self.num_iter)
-        if self.num_iter > len(self.X):
-            kernels = self.kernel(self.X, self.X)
-        else:
-            kernels = self.kernel(self.X, self.X[upd_idx])
-        for t in range(1, self.num_iter+1):
-            # i = np.random.randint(self.X.shape[0])
-            # s1 = time.time()
-            # kernel_value = self.kernel(self.X, self.X[i].reshape(1,-1)).reshape(-1)
-            idx = upd_idx[t-1]
-            if self.num_iter > len(self.X):
-                kernel_value = kernels[:, idx].reshape(-1)
+        for i in range(num_batches):
+            upd_idx = np.random.randint(low = 0, high = self.X.shape[0], size=batch_size)
+            kernels = None
+            if batch_size > len(self.X):
+                kernels = self.kernel(self.X, self.X)
             else:
-                kernel_value = kernels[:, t-1].reshape(-1)
-            # start = time.time()
-            kernel_value = self.alpha * self.y  * kernel_value
-            if self.loss_fn_type == 'hinge':
-                if self.y[idx]*np.sum(kernel_value) < self.lambd*t: 
-                    self.alpha[idx] += 1
-            elif self.loss_fn_type == 'logistic':
-                self.alpha[idx] += 1/(1 + np.exp(self.y[idx]*np.sum(kernel_value)))
-            # end = time.time()
-            # acc += end - start
-            # acc1 += start - s1
-            # if t % 100 == 0:
-                # print("Kernel Calculation : ", acc1/100)
-            #     print("Rest Calculation : ", acc/100)
-            #     acc = 0
-                # acc1 = 0
-        del kernels
-        # print(np.sum(self.alpha)/self.num_iter)
+                kernels = self.kernel(self.X, self.X[upd_idx])
+            for t in range(1, batch_size+1):
+                # i = np.random.randint(self.X.shape[0])
+                # s1 = time.time()
+                # kernel_value = self.kernel(self.X, self.X[i].reshape(1,-1)).reshape(-1)
+                cur_t = t + i*batch_size
+                idx = upd_idx[t-1]
+                if batch_size > len(self.X):
+                    kernel_value = kernels[:, idx].reshape(-1)
+                else:
+                    kernel_value = kernels[:, t-1].reshape(-1)
+                # start = time.time()
+                kernel_value = self.alpha * self.y  * kernel_value
+                if self.loss_fn_type == 'hinge':
+                    if self.y[idx]*np.sum(kernel_value) < self.lambd*cur_t: 
+                        self.alpha[idx] += 1
+                elif self.loss_fn_type == 'logistic':
+                    self.alpha[idx] += 1/(1 + np.exp(self.y[idx]*np.sum(kernel_value)))
+                # end = time.time()
+                # acc += end - start
+                # acc1 += start - s1
+                # if t % 100 == 0:
+                    # print("Kernel Calculation : ", acc1/100)
+                #     print("Rest Calculation : ", acc/100)
+                #     acc = 0
+                    # acc1 = 0
+            del kernels
+            # print(np.sum(self.alpha)/self.num_iter)
 
 
     def check_data(self, X, y):
