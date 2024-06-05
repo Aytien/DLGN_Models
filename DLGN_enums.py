@@ -13,7 +13,7 @@ class LossTypes(Enum):
 
 class KernelTrainMethod(Enum):
     PEGASOS = 'PEGASOS'
-    VANILA = 'VANILA'
+    GD = 'GD'
     SVC = 'SVC'
     SNACKS = 'SNACKS'
 

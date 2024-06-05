@@ -108,13 +108,13 @@ def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
     preds = torch.cat(preds, dim=0)
     cor_idx = torch.cat(cor_idx, dim=0)
     if config.model_type == ModelTypes.KERNEL:
+        tmp = preds
+        if config.loss_fn_type == LossTypes.CE:
+            tmp = preds[:,1]
         if config.train_method == KernelTrainMethod.PEGASOS:
-            if config.loss_fn_type == LossTypes.CE:
-                reg_loss = (torch.dot(preds[:,1], model.alphas.data) * (config.reg / 2)).item()
-            elif config.loss_fn_type == LossTypes.HINGE:
-                reg_loss = (torch.dot(preds, model.alphas.data) * (config.reg / 2)).item()
+            reg_loss = (torch.dot(tmp, model.alphas.data) * (config.reg / 2)).item()
         elif config.train_method == KernelTrainMethod.SVC:
-            reg_loss = (torch.dot(preds, model.alphas.data) / (config.reg * 2 * len(labels))).item()
+            reg_loss = (torch.dot(tmp, model.alphas.data) / (config.reg * 2 * len(labels))).item()
 
     total_loss /= len(labels)
     if acc!=0:
@@ -129,7 +129,7 @@ def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
         if config.model_type == ModelTypes.KERNEL:
             print("Proximity: ", check_dth_proximity(model, config.dim_in, config.threshold))
             print("Loss with regularization: ", (total_loss + reg_loss))
-        print("Incorrect Loss: ", total_inc_loss, "Correct Loss: ", total_cor_loss)
+        # print("Incorrect Loss: ", total_inc_loss, "Correct Loss: ", total_cor_loss)
 
     if config.model_type == ModelTypes.KERNEL:
         return total_loss, acc, total_loss + reg_loss
@@ -195,114 +195,30 @@ def train_model(data, config):
 def kernel_train_methods(model, loss_fn, data, config):
     train_method = config.train_method
     
-    if train_method == KernelTrainMethod.PEGASOS or train_method == KernelTrainMethod.SVC or train_method == KernelTrainMethod.SNACKS: 
-        return svc_train(model, loss_fn, data, config)#[0]
-    elif train_method == KernelTrainMethod.VANILA:
-        return vanila_train(model, loss_fn, data, config)[0]
-    # elif train_method == KernelTrainMethod.SVC:
-        # return svc_train(model, loss_fn, data, config)
+    if train_method == KernelTrainMethod.PEGASOS or train_method == KernelTrainMethod.SVC: 
+        return svc_train(model, loss_fn, data, config)
+    elif train_method == KernelTrainMethod.GD:
+        return gd_train(model, loss_fn, data, config)
+
     return None
 
-def pegasos_train(model, loss_fn, data, config):
-
-    train_data = data['train_data']
-    test_data = data['test_data']
-    train_labels = data['train_labels']
-    test_labels = data['test_labels']
-
-    log_features = config.log_features
-
-    lr_pg = config.lr_pg # learning rate for the pegasos algorithm
-    reg_pg = config.reg_pg # lambda for the pegasos algorithm
-
-    optimizer = None
-    if(config.optimizer_type == Optim.SGD):
-        optimizer = torch.optim.SGD([{'params': [param for param in model.gates], 'lr': 0.1},])
-
-
-    log_epochs = 10
-    log_weight = log_epochs
-    num_epochs = 1000
-    value_freq = config.value_freq   #frequency of going thru value update sub-routine
-    value_epochs = config.value_epochs # number of epochs for which value update happens
-    update_value_epochs = list(range(0,num_epochs+1,value_freq))
-
-    batch_size = 32
-    train_dataset = CustomDataset(train_data, train_labels)
-    test_dataset = CustomDataset(test_data, test_labels)
-
-    # Create DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    if(log_features):
-        features_initial = model.log_features()
-        features_train=[]
-
-    train_losses=[]
-    for epoch in range(num_epochs):
-        if epoch in update_value_epochs:
-            num_iter = 1000
-            clf = Pegasos_kernel(config.reg, num_iter, model.forward)
-            clf.fit(train_data.cpu(), train_labels.cpu())
-            model.alphas.data = torch.tensor(clf.alpha, requires_grad=False).to(config.device)
-        #     # pick a random training example index from train_data and update the corresponding alpha
-        #     #print loss before pegasos update
-        #     print('Loss before pegasos update')
-        #     print(f'Loss {loss_fn(model(train_data, train_data),train_labels).item():.4f}')
-        #     # for i in range(value_epochs):
-        #     for i in range(value_epochs):
-        #         rand_index = np.random.randint(len(train_data))
-        #         x = train_data[rand_index]
-        #         y = train_labels[rand_index]
-        #         model.alphas.data -= lr_pg*reg_pg*model.alphas.data
-        #         model_output = model(train_data[rand_index],train_data)
-        #         if y*model_output < 1:
-        #             model.alphas.data[rand_index] += lr_pg*y
-        #     print('Loss after pegasos update')
-        #     print(f'Loss {loss_fn(model(train_data, train_data),train_labels).item():.4f}')
-
-                
-        for x_batch, y_batch in train_dataloader:
-            optimizer.zero_grad()
-            pred = model(x_batch,train_data)
-            loss = loss_fn(pred, y_batch)
-            loss.backward()
-            optimizer.step()
-        
-        if epoch % log_weight == 0  and log_features:
-            features_train.append(model.log_features())
-
-        if epoch % log_epochs == 0:
-            y_pred = model(train_data, train_data)
-            loss_full = loss_fn(y_pred,train_labels)
-            train_accuracy = 0.0
-            if config.loss_fn_type == LossTypes.HINGE:
-                train_accuracy = np.sum((y_pred.cpu().detach().numpy() > 0) == (train_labels.cpu().numpy() > 0))/len(train_labels)
-            else:
-                train_accuracy = np.sum((y_pred.cpu().detach().numpy() > 0.5) == (train_labels.cpu().numpy() > 0.5))/len(train_labels)
-            if(config.use_wandb):
-                wandb.log({'train_loss': loss_full.item(), 'train_accuracy': train_accuracy, 'epoch': epoch})
-            train_losses.append(loss_full.item())
-
-            # fs = feature_stats(features_train[-1],data_dim=dim_in,tree_depth=tree_depth,dim_in=dim_in)
-            print(f'Epoch {epoch} Loss {loss_full.item():.4f}')
-
-            if loss_full.item() < 0.01:
-                print(f'Early stopping at epoch {epoch} because loss is below 0.01')
-                break
-
-    if(log_features):
-        features_final = model.log_features()
-
-    return model, train_losses
 
 def svc_train(model, loss_fn, data, config):
+    '''
+    Trains the DLGN Kernel model using different SVM solvers
+    Currently two solvers are supported:
+    1. SVC: Uses the sklearn SVC solver
+    2. PEGASOS: Uses the Pegasos solver
+    Training is done in two steps:
+    1. Fixes the gating functions and updates the alphas using the SVM solver
+    2. Trains the gating functions using gradient descent for a few epochs
+    '''
     train_data = data['train_data']
     test_data = data['test_data']
     train_labels = data['train_labels']
     test_labels = data['test_labels']
 
+    # Batch size for training
     batch_size = 1024
     train_dataset = CustomDataset(train_data, train_labels)
     test_dataset = CustomDataset(test_data, test_labels)
@@ -335,15 +251,18 @@ def svc_train(model, loss_fn, data, config):
     update_value_epochs = list(range(0,num_epochs+1,config.value_freq))
     tepoch = tqdm(range(num_epochs+1))
     for epoch in tepoch:
+        # Update the alphas using the SVM solver at the specified epochs
         if epoch in update_value_epochs:
             pre_update_loss, train_acc, pre_update_regloss = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
             if config.use_wandb == False:
-                print("Loss before updating alphas at epoch", epoch, " is ", pre_update_loss)
+                print("Before updating alphas at epoch", epoch, " Train Loss : ", pre_update_loss, " Train Accuracy : ", train_acc)
+
             train_losses.append(pre_update_loss)
             reg_losses.append(pre_update_regloss)
             npk = model.get_npk
-            start = time.time()
+
             if config.train_method == KernelTrainMethod.SVC:
+                # Train the model using the SVC solver
                 clf = SVC(C=config.reg, kernel=npk)
                 clf.fit(train_data.cpu(), train_labels.cpu())
                 dual_coef = clf.dual_coef_.T
@@ -351,29 +270,29 @@ def svc_train(model, loss_fn, data, config):
                 for (idx, sv_idx) in enumerate(clf.support_):
                     model.alphas.data[sv_idx] = torch.tensor(dual_coef[idx])
             elif config.train_method == KernelTrainMethod.PEGASOS:
+                # Train the model using the Pegasos solver
                 num_iter = config.num_iter
                 kernel_loss_fn_type = 'hinge' if config.loss_fn_type == LossTypes.HINGE else 'logistic'
                 clf = Pegasos_kernel(lambd=config.reg, num_iter=num_iter, kernel=npk, loss_fn_type=kernel_loss_fn_type)
                 clf.fit(train_data.cpu(), train_labels.cpu())
                 model.alphas.data = torch.tensor((clf.alpha * clf.y) / (config.reg * num_iter), requires_grad=False, dtype=torch.float32).to(config.device)
-            end = time.time()
-            print("Time taken to fit alphas: ", end-start)
+            
             post_update_loss, train_acc, post_update_regloss = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
             if config.use_wandb:
                 wandb.log({'train_loss': post_update_loss, 'epoch': epoch, 'train_accuracy': train_acc, 'update_loss_diff': post_update_regloss - pre_update_regloss})
             else:
-                print("Loss after updating alphas at epoch", epoch, " is ", post_update_loss)
+                print("After updating alphas at epoch", epoch, " Train Loss : ", post_update_loss, " Train Accuracy : ", train_acc)
             train_losses.append(post_update_loss)
             reg_losses.append(post_update_regloss)
             test_loss, test_acc, _un = cal_loss(model, loss_fn, train_data, test_dataloader, test_labels, config, print_acc=True)
-            proximity = check_dth_proximity(model, config.dim_in, config.threshold)
-            
+    
             if config.use_wandb:
+                proximity = check_dth_proximity(model, config.dim_in, config.threshold)
                 wandb.log({'test_loss': test_loss, 'epoch': epoch, 'test_accuracy': test_acc,'avg_proximity': np.mean(proximity), 'max_proximity': np.max(proximity)})
             else:
-                print("Test loss after updating alphas at epoch", epoch, " is ", test_loss)
+                print("Test Loss : ", test_loss, " Test Accuracy : ", test_acc)
 
-
+        # Train the gating functions using gradient descent
         for x_batch, y_batch in train_dataloader:
             optimizer.zero_grad()
             outputs = model(x_batch,train_data).reshape(-1)
@@ -399,7 +318,10 @@ def svc_train(model, loss_fn, data, config):
                 torch.cuda.empty_cache()
     return model, train_losses, reg_losses
 
-def vanila_train(model, loss_fn, data, config):
+def gd_train(model, loss_fn, data, config):
+    '''
+    Trains the DLGN Kernel model entirely using gradient descent
+    '''
     train_data = data['train_data']
     test_data = data['test_data']
     train_labels = data['train_labels']
@@ -416,13 +338,19 @@ def vanila_train(model, loss_fn, data, config):
     optimizer = None
     if(config.optimizer_type == Optim.SGD):
         optimizer = torch.optim.SGD([
-        {'params': [param for param in model.gates], 'lr': config.gates_lr},
+        {'params': [param for param in model.gating_layers], 'lr': config.gates_lr},
+        {'params': model.alphas, 'lr': config.alpha_lr, 'weight_decay': config.weight_decay}
+    ])
+    elif config.optimizer_type == Optim.ADAM:
+        optimizer = torch.optim.Adam([
+        {'params': [param for param in model.gating_layers], 'lr': config.gates_lr},
         {'params': model.alphas, 'lr': config.alpha_lr, 'weight_decay': config.weight_decay}
     ])
 
+
     log_epochs = 10
     log_weight = log_epochs
-    num_epochs = 1000
+    num_epochs = config.epochs
 
     log_features = config.log_features
 
@@ -430,38 +358,42 @@ def vanila_train(model, loss_fn, data, config):
         features_initial = model.log_features()
         features_train=[]
     train_losses=[]
-
-    for epoch in range(num_epochs):
+    
+    tepoch = tqdm(range(num_epochs+1))
+    for epoch in tepoch:
         # model.train()
         # if epoch%100 ==0 :
         #     if epoch%100 ==0:    ## alternating every 20 epochs can we do better??
         #         flag = not(flag)
         #     if flag:
-        #         print('Gates')
+        #         print('gating_layers')
         #     else:
         #         print('Alphas')
         #     if flag:
-        #         for param in model.gates:
+        #         for param in model.gating_layers:
         #             param.requires_grad = True
         #             #print(param)
         #         model.alphas.requires_grad = False
         #         #print(model.alphas)
         #     else:
-        #         for param in model.gates:
+        #         for param in model.gating_layers:
         #             param.requires_grad = False
         #             #print(param)
         #         model.alphas.requires_grad = True
         #         #print(model.alphas)
 
         for x_batch, y_batch in train_dataloader:
-            x_batch = x_batch
-            y_batch = y_batch
-            pred = model(x_batch,train_data)
-            loss = loss_fn(pred, y_batch)
+            optimizer.zero_grad()
+            outputs = model(x_batch,train_data).reshape(-1)
+            if(config.loss_fn_type == LossTypes.CE):
+                outputs = outputs.reshape(-1,1)
+                outputs = torch.cat((-1*outputs, outputs), dim=1)
+            loss = loss_fn(outputs, y_batch)
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
 
+        train_loss, train_acc, reg_loss = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=False)
+        train_losses.append(train_loss)
 
         if epoch % log_weight == 0 and log_features:
             features_train.append(model.log_features())
@@ -475,15 +407,14 @@ def vanila_train(model, loss_fn, data, config):
                 train_accuracy = np.sum((y_pred.cpu().detach().numpy() > 0.5) == (train_labels.cpu().numpy() > 0.5))/len(train_labels)
             if(config.use_wandb):
                 wandb.log({'train_loss': loss_full.item(), 'train_accuracy': train_accuracy, 'epoch': epoch})
-            print(f'Train Accuracy: {train_accuracy}')
-            train_losses.append(loss_full.item())
+            train_loss, train_acc, reg_loss = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
 
-            print(f'Epoch {epoch} Loss {loss_full.item():.4f}')
+            # print(f'Epoch {epoch} Loss {train_loss:.4f}')
 
-            if loss_full.item() < 0.01:
+            if train_loss < 0.01:
                 print(f'Early stopping at epoch {epoch} because loss is below 0.01')
                 break
-
+        tepoch.set_description(f"Train Loss: {train_loss:.4f}")       
     if(log_features):
         features_final = model.log_features()
 
