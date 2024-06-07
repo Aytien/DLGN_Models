@@ -1,4 +1,4 @@
-*.ipynb
+test*.ipynb
 __pycache__/
 figures/
 outputs/

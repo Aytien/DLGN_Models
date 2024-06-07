@@ -1,0 +1,70 @@
+VN : 
+config = {
+    "device" : device,
+    "model_type" : ModelTypes.VN,
+    "num_data" : len(data['train_data']),
+    "dim_in" : data_config.dim_in,
+    "num_hidden_nodes" : [100]*4, 
+    "beta" : 30,
+    "loss_fn_type" : LossTypes.CE,
+    "optimizer_type" : Optim.ADAM,
+    "mode" : "pwc",
+    "lr_ratio" : 1,
+    "log_features" : False,
+    "lr" : 0.001,
+    "epochs" : 1000,
+    "use_wandb" : False
+}
+
+VT : 
+config = {
+    "device" : device,
+    "model_type" : ModelTypes.VT,
+    "num_data" : len(data['train_data']),
+    "dim_in" : data_config.dim_in,
+    "num_hidden_nodes" : [10]*4,
+    "beta" : 30,
+    "mode" : "pwc",
+    "value_scale" : 500,
+    "BN" : False,
+    "prod" : "op",
+    "feat" : "sf", 
+    "loss_fn_type" : LossTypes.CE,
+    "optimizer_type" : Optim.ADAM,
+    "epochs" : 1000,
+    "save_freq" : 100,
+    "value_freq" : 100,
+    "lr": 0.001,
+    "vt_fit" : VtFit.NPKSVC,
+    "reg" : 1,
+    "use_wandb" : False,
+}
+
+Kernel : 
+config = {
+    "device" : device,
+    "model_type" : ModelTypes.KERNEL,
+    "num_data" : len(data['train_data']),
+    "dim_in" : data_config.dim_in,
+    "width" : 100,
+    "depth" : 4,
+    "beta" : 30,
+    "alpha_init" : None,
+    "BN" : True,
+    "loss_fn_type" : LossTypes.HINGE,
+    "optimizer_type" : Optim.ADAM,
+    "train_method" : KernelTrainMethod.PEGASOS,
+    "log_features" : False,
+    "gates_lr" : 0.001,
+    "alpha_lr" : 0.1,
+    "reg" : 1,
+    "epochs" : 1000,
+    "value_freq": 100,
+    "num_iter" : 50000,
+    'weight_decay' : 0.01,
+    'feat' : "cf",
+    'threshold' : 0.3,
+    "use_wandb" : False,
+}
+
+

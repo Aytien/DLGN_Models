@@ -73,6 +73,8 @@ def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
     for x_batch, y_batch in dataloader:
         if config.model_type == ModelTypes.KERNEL:
             pred_batch = model(x_batch, data)
+        elif config.model_type == ModelTypes.VN:
+            pred_batch = model(x_batch)[0][-1]
         else:
             pred_batch = model(x_batch)
 
@@ -135,7 +137,6 @@ def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
         return total_loss, acc, total_loss + reg_loss
     else:
         return total_loss, acc
-
 
 def train_model(data, config):
 
@@ -201,7 +202,6 @@ def kernel_train_methods(model, loss_fn, data, config):
         return gd_train(model, loss_fn, data, config)
 
     return None
-
 
 def svc_train(model, loss_fn, data, config):
     '''
@@ -429,7 +429,7 @@ def vn_train_methods(model, loss_fn, data, config):
     device = config.device
     lr_ratio = config.lr_ratio
 
-    batch_size = 32
+    batch_size = 512
     train_dataset = CustomDataset(train_data, train_labels)
     test_dataset = CustomDataset(test_data, test_labels)
 
@@ -440,10 +440,19 @@ def vn_train_methods(model, loss_fn, data, config):
     optimizer = None
     if(config.optimizer_type == Optim.ADAM):
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+
+    # parameter_mask=dict()
+    # for name,parameter in model.named_parameters():
+    #     if name[:5]=="value_"[:5]:
+    #         parameter_mask[name]=torch.ones_like(parameter) # Updating all value network layers
+    #     if name[:5]=="gating_"[:5]:
+    #         parameter_mask[name]=torch.ones_like(parameter)
+    #     parameter_mask[name].to(device)
     
-    num_epochs = 3000
+    num_epochs = config.epochs
     train_losses = []
-    for epoch in tqdm(range(num_epochs)):
+    tepoch = tqdm(range(num_epochs))
+    for epoch in tepoch:
         running_loss = 0.0
         train_acc = 0
 
@@ -452,20 +461,26 @@ def vn_train_methods(model, loss_fn, data, config):
             values, gate_scores = model(x_batch)
             # Check the sign of values and assign the label accordingly
             outputs = torch.cat((-1*values[-1], values[-1]), dim=1)
-            pred = values[-1].clamp(0,1).to(torch.int16)
-            train_acc += torch.sum(pred == y_batch).cpu().detach().numpy()
+            train_acc += torch.sum(torch.argmax(outputs, dim=1) == y_batch).cpu().detach().numpy()
             loss = loss_fn(outputs, y_batch)
             loss.backward()
-            for name,param in model.named_parameters():
-                parameter_mask[name] = parameter_mask[name].to(device)
-                param.grad *= parameter_mask[name]   
+            # for name,param in model.named_parameters():
+            #     parameter_mask[name] = parameter_mask[name].to(device)
+            #     param.grad *= parameter_mask[name]   
             for name,param in model.named_parameters():
                 if "val" in name:
                     param.grad /= lr_ratio
             optimizer.step()
-            running_loss += loss.item()
-        train_acc = train_acc/len(train_data)
-        train_losses.append(running_loss/num_batches)
+            running_loss += loss.item() * len(y_batch)
+        train_acc = train_acc/len(train_labels)
+        train_loss = running_loss/len(train_labels)
+        train_losses.append(train_loss)
+        tepoch.set_description(f"Train Loss: {train_loss:.4f}")
+        if epoch%100 == 0:
+            test_loss, test_acc = cal_loss(model, loss_fn, train_data, test_dataloader, test_labels, config, print_acc=False)
+            print(f"Epoch {epoch} Train Loss: {train_loss:.4f} Train Accuracy: {train_acc:.4f}")
+            print(f"Epoch {epoch} Test Loss: {test_loss:.4f} Test Accuracy: {test_acc:.4f}")
+    return model, train_losses
 
 def vt_train_methods(model, loss_fn, data, config):
 

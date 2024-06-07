@@ -18,8 +18,6 @@ import wandb
 
 np.set_printoptions(precision=2)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 def set_torchseed(seed):
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
@@ -96,11 +94,8 @@ class DLGN_FC(nn.Module):
 		'''
 		gate_scores=[x]
 
-		for el in self.parameters():
-			if el.is_cuda:
-				device = torch.device('cuda')
-			else:
-				device = torch.device('cpu')
+		device = self.gating_layers[0].weight.device
+
 		if self.mode=='pwc':
 			values=[torch.ones(x.shape).to(device)]
 		else:
@@ -218,6 +213,7 @@ def get_trained_dlgn(DLGN_init,data,**kwargs):
 	Returns the trained model
  	'''
 	train_parameter_masks=dict()
+	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 	for name,parameter in DLGN_init.named_parameters():
 		if name[:5]=="value_"[:5]:
 			train_parameter_masks[name]=torch.ones_like(parameter) # Updating all value network layers
@@ -241,15 +237,16 @@ def get_trained_dlgn(DLGN_init,data,**kwargs):
 	return DLGN_obj_final, DLGN_obj_store
 
 def test_acc_dlgn(X_test,y_test,DLGN_obj):
-    '''
-    Computes the test accuracy of the DLGN model
-    '''
-    X_test = torch.Tensor(X_test).to(device)
-    preds_DLGN = DLGN_obj(X_test)[0]
-    test_preds = torch.cat((-1*preds_DLGN[-1], preds_DLGN[-1]), dim=1)
-    test_preds = torch.argmax(test_preds, dim=1)
-    targets = torch.tensor(y_test, dtype=torch.int64).to(device)
-    test_error= torch.sum(targets!=test_preds)
-    test_error = test_error.to(torch.device('cpu'))
-    return 1-test_error.detach().numpy()/float(len(y_test))
+	'''
+	Computes the test accuracy of the DLGN model
+	'''
+	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+	X_test = torch.Tensor(X_test).to(device)
+	preds_DLGN = DLGN_obj(X_test)[0]
+	test_preds = torch.cat((-1*preds_DLGN[-1], preds_DLGN[-1]), dim=1)
+	test_preds = torch.argmax(test_preds, dim=1)
+	targets = torch.tensor(y_test, dtype=torch.int64).to(device)
+	test_error= torch.sum(targets!=test_preds)
+	test_error = test_error.to(torch.device('cpu'))
+	return 1-test_error.detach().numpy()/float(len(y_test))
 

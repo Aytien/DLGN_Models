@@ -14,9 +14,9 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(seed)
 
     # Set the device
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
-    DATASET = "dataset3"
+    DATASET = "dataset3b"
 
     DATA_DIR = 'data/' + DATASET
     data = {}
@@ -32,14 +32,14 @@ if __name__ == "__main__":
     wandb.login()
 
     sweep_config = {
-        "name": "KernelPegasos_D3_CE",
-        "method": "random",
+        "name": "KernelPegasos_D1_value_freq",
+        "method": "grid",
         "parameters": {
             "depth": {
-                "values": [3,4,5]
+                "values": [5]
             },
             "width": {
-                "values": [16,32,128,1024]
+                "values": [128]
             },
             "beta": {
                 "values": [30]
@@ -54,16 +54,16 @@ if __name__ == "__main__":
                 "values": [True]
             },
             "gates_lr": {
-                "values": [0.01]
+                "values": [0.001]
             },
             "epochs":{
                 "values": [1000]
             },
             "reg": {
-                "values": [0.001]
+                "values": [0.0005]
             },
             "value_freq": {
-                "values": [25,50,100]
+                "values": [25]
             },
             "num_iter": {
                 "values": [5e4]
@@ -77,23 +77,25 @@ if __name__ == "__main__":
             "use_wandb": {
                 "values": [True]
             },
-
+            "feat": {
+                "values": ['cf']
+            },
         }
     }
     sweep_id = wandb.sweep(sweep_config, entity=WANDB_ENTITY, project=WANDB_PROJECT_NAME)
     const_config = {
         "device" : device,
         "model_type" : ModelTypes.KERNEL,                    
-        "loss_fn_type" : LossTypes.CE,
+        "loss_fn_type" : LossTypes.HINGE,
         "optimizer_type" : Optim.ADAM,
-        "train_method" : KernelTrainMethod.PEGASOS,
+        "train_method" :KernelTrainMethod.PEGASOS,
         "num_data" : len(data['train_data']),
         "dim_in": data_config.dim_in,
     }
     def wb_sweep_sf():
         run = wandb.init()
         config = wandb.config
-        filename_suffx = str(config.depth) + '_' + str(config.width) + '_' + format(config.value_freq,".1e")   
+        filename_suffx = str(config.value_freq) 
         run.name = filename_suffx
         config = {**config, **const_config}
         config = Namespace(**config)
@@ -101,7 +103,7 @@ if __name__ == "__main__":
         run.finish()
         torch.cuda.empty_cache()
         return
-    wandb.agent(sweep_id, wb_sweep_sf, entity=WANDB_ENTITY, project=WANDB_PROJECT_NAME, count=40)
+    wandb.agent(sweep_id, wb_sweep_sf, entity=WANDB_ENTITY, project=WANDB_PROJECT_NAME)
     wandb.finish()
 
 
