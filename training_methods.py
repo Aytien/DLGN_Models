@@ -50,6 +50,10 @@ def sigmoid(u):
     return 1/(1+np.exp(-u))
 
 def check_dth_proximity(model, data_dim, threshold=0.5):
+    '''
+    Check the proximity of the model features to the decision tree hyperplanes.
+    The hyperplanes are fixed as the axis in the input dimension.
+    '''
     features = model.log_features()
     count = np.zeros(len(features))
     dt_hps = torch.eye(data_dim)
@@ -63,6 +67,9 @@ def check_dth_proximity(model, data_dim, threshold=0.5):
     return count
 
 def cal_loss(model, loss_fn, data, dataloader, labels, config, print_acc=False):
+    '''
+    Calculate the loss for any supported function and model
+    '''
     preds = []
     total_loss = 0
     total_inc_loss = 0
@@ -421,6 +428,9 @@ def gd_train(model, loss_fn, data, config):
     return model, train_losses
 
 def vn_train_methods(model, loss_fn, data, config):
+    '''
+    Trains the DLGN VN model using gradient descent
+    '''
     train_data = data['train_data']
     test_data = data['test_data']
     train_labels = data['train_labels']
@@ -438,7 +448,9 @@ def vn_train_methods(model, loss_fn, data, config):
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     optimizer = None
-    if(config.optimizer_type == Optim.ADAM):
+    if(config.optimizer_type == Optim.SGD):
+        optimizer = torch.optim.SGD(model.parameters(), lr=config.lr)
+    elif(config.optimizer_type == Optim.ADAM):
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
 
     # parameter_mask=dict()
@@ -483,7 +495,19 @@ def vn_train_methods(model, loss_fn, data, config):
     return model, train_losses
 
 def vt_train_methods(model, loss_fn, data, config):
-
+    '''
+    Trains the DLGN VT model, by performing gradient descent and logistic regression.
+    There are various solvers to perform logistic regression, currently 6 are supported:
+    1. LinearSVC: Uses the sklearn LinearSVC solver
+    2. LogisticRegression: Uses the sklearn LogisticRegression solver
+    3. SVC: Uses the sklearn SVC solver (Doesn't converge currently)
+    4. NPKSVC: Uses the sklearn SVC solver with the NPK as the kernel function
+    5. Pegasos: Uses the Pegasos solver 
+    6. PegasosKernel: Uses the NPK kernel for the Pegasos Solver
+    Training is done in two steps:
+    1. Fixes the gating functions and updates the value tensor using logistic regression
+    2. Trains the gating functions using gradient descent for a few epochs
+    '''
     train_data = data['train_data']
     test_data = data['test_data']
     train_labels = data['train_labels']
@@ -625,7 +649,7 @@ def vt_train_methods(model, loss_fn, data, config):
             A[:] = torch.Tensor(value_wts)
 
             train_loss, train_acc = cal_loss(model, loss_fn, train_data, train_dataloader, train_labels, config, print_acc=True)
-            test_loss, test_acc = cal_loss(model, loss_fn, train_data, test_dataloader, test_labels, config, print_acc=True)
+            test_loss, test_acc = cal_loss(model, loss_fn, train_data, test_dataloader, test_labels, config, print_acc=False)
 
             # with open(filename,'a') as f:
             #     sys.stdout = f
@@ -733,4 +757,3 @@ def vt_train_methods(model, loss_fn, data, config):
         
     # return losses, acc_dict, model_return,best_test_error, model_store
     return model, train_losses
-
